@@ -1,42 +1,199 @@
-# Gudok.ru Sitemap — DEV-only prototype
+# Генератор Sitemap для 1С-Битрикс
 
-## Important boundaries
+В `SitemapConfig.php` указываются ID одного или нескольких инфоблоков: через запятую,
+диапазонами или одновременно обоими способами. `generate.php`
+строит карту **только из элементов этих инфоблоков**. Разделы, связанные инфоблоки,
+SKU и статические страницы отдельно не обходятся. Элементы из любых разделов
+выбранного инфоблока включаются на общих основаниях.
 
-This archive does not modify the existing sitemap, robots.txt, Bitrix handlers, or old module. Production execution is deliberately disabled. It has NOT been executed against the Gudok dev server. Validate PHP extensions `xmlwriter`, `xmlreader` and GNU `sort`, and Bitrix API behavior before any scheduled execution.
+Все опубликованные XML находятся **в корне сайта**:
 
-## Installation
+```text
+/sitemap_index.xml
+/sitemap-auto-20261017090000-a1b2c3d4e5f60708-0001.xml
+/sitemap-auto-20261017090000-a1b2c3d4e5f60708-0002.xml
+```
 
-Copy `local/php_interface/sitemap/` into the matching location under `/mnt/home/bitrix/ext_www/gudok/public_html/`. Do not deploy to production. The configured output is `/upload/sitemap_dev_test/`, which is publicly accessible on dev unless protected by server configuration; do not link it from robots.txt.
+## Установка
 
-## Commands (one line each)
+Нужны PHP CLI **8.0+**, расширение `xmlreader`, модуль Битрикс `iblock` и доступ
+пользователя CLI к базе Битрикс и записи в корень сайта. Для старых сайтов с кодировкой
+отличной от UTF-8 также нужен `iconv`. GNU `sort`, SQLite и Composer не требуются.
 
-`cd /mnt/home/bitrix/ext_www/gudok/public_html && php -m | grep -Ei 'xmlwriter|xmlreader'`
+1. Скопируйте каталог в `/local/php_interface/sitemap/` сайта. Каталог `.git`, `.idea`
+   и `tests` для работы генератора не нужен.
+2. Впишите инфоблоки: `'root_iblocks' => '10-15,20,25-30'`. Проверьте `site_id`:
+   по умолчанию это `s1`. Домен берётся из настроек сайта Битрикс.
+3. Выполните тестовую генерацию, проверьте XML в каталоге из `preview_directory`.
+4. Запустите обычную генерацию для публикации в корень.
 
-`cd /mnt/home/bitrix/ext_www/gudok/public_html && php -l local/php_interface/sitemap/cron/generate.php && php -l local/php_interface/sitemap/SitemapRepository.php && php -l local/php_interface/sitemap/SitemapGenerator.php && php -l local/php_interface/sitemap/SitemapXmlWriter.php`
+Минимальный конфиг для нового сайта, возвращаемый из PHP-файла:
 
-`cd /mnt/home/bitrix/ext_www/gudok/public_html && php local/php_interface/sitemap/cron/generate.php --test`
+```php
+<?php
+return [
+    'root_iblocks' => '10-15,20,25-30',
+];
+```
 
-`cd /mnt/home/bitrix/ext_www/gudok/public_html && find upload/sitemap_dev_test -maxdepth 1 -name '*.xml' -type f -printf '%f %s bytes\n' | sort`
+Корень автоматически ищется среди родительских каталогов **конфига** по наличию
+`bitrix/modules/main/include/prolog_before.php`. Если конфиг находится вне сайта:
 
-`cd /mnt/home/bitrix/ext_www/gudok/public_html && tail -n 5 upload/sitemap_dev_test.log`
+```php
+'document_root' => '/var/www/example.ru/public_html',
+```
 
-## Cron example (DEV ONLY; do not enable before acceptance)
+При `host=null` домен читается из поля `SERVER_NAME` настроек сайта Битрикс,
+затем из `server_name` главного модуля. По умолчанию используется HTTPS.
+Если домен не заполнен, генерация остановится с понятной ошибкой. Для HTTP,
+нестандартного порта или переопределения домена укажите, например,
+`'host' => 'http://example.ru:8080'`. Кириллический домен укажите в punycode.
+Для многосайтовости используйте отдельные конфиги с доменом, `site_id`, ID и корнем
+каждого сайта. В одном физическом корне задавайте разный `index_name` для каждой
+отдельной карты.
 
-`0 3 * * * cd /mnt/home/bitrix/ext_www/gudok/public_html && /usr/bin/php local/php_interface/sitemap/cron/generate.php --test >> /tmp/gudok-sitemap-cron.log 2>&1`
+## Запуск
 
-## Scope and unresolved checks
+```bash
+php /var/www/example.ru/public_html/local/php_interface/sitemap/generate.php --test
+php /var/www/example.ru/public_html/local/php_interface/sitemap/generate.php
+php /var/www/example.ru/public_html/local/php_interface/sitemap/generate.php --config=/etc/example-sitemap.php
+```
 
-Configured: 49, 50, 53, 167–181, 185, 367–382, 234. Candidate 305 disabled. 187, 446, 447 excluded. `ACTIVE_DATE` filtering is disabled so active archival elements are included regardless of publication window. Bitrix `GetNext()` returns processed URL templates; verify resolved `DETAIL_PAGE_URL` on dev. Canonical and HTTP status are NOT automatically checked: manually inspect `/zdr/` and news duplicates before approval. This version uses disk-backed URL-hash deduplication with GNU `sort` (`LC_ALL=C`, 32 MB sort buffer); it requires sufficient free disk space for spool and sort temporary files. It does not use SQLite or change the database. This version uses URL-level deduplication, not content-level deduplication. `TIMESTAMP_X` supplies lastmod. The script does not crawl pages or inspect robots/noindex directives. Do not claim that every exported URL is publicly indexable without additional validation.
+Прежний путь `cron/generate.php` тоже работает. Рабочий каталог запуска произвольный.
+Запуск через браузер закрыт. Неизвестные аргументы вызывают ошибку.
 
-The writer uses conservative 45,000 URL / 45 MB split targets. XMLReader parses all generated files before publication. On failure, staging directory is preserved for diagnosis. Successful repeat runs move the previous test directory to `.sitemap-previous-PID`; remove old backups manually after validation. The rename of a directory is atomic on the same filesystem, but concurrent readers holding old file paths can still encounter a swap boundary.
+`--test` выполняет ту же выборку, сортировку и проверку XML, но оставляет результат
+в служебном каталоге. XML в корне сайта не меняются. Предпросмотры и каталоги
+неудачных запусков оставляются для диагностики; после проверки их можно удалить.
 
-## Before production
+Пример cron (пути замените на реальные):
 
-1. Check representative output URLs and actual canonical HTML, especially `/zdr/` and blocks 367–382; decide about 305.
-2. Check HTTP 200, robots meta/X-Robots-Tag, canonical, and duplicate-content mapping with an agreed validation procedure.
-3. Confirm dev URL resolution, GNU sort availability, and server resources.
-4. Confirm backup, production output location, production cron schedule, and explicit approval before enabling production mode or changing robots.txt.
+```cron
+0 3 * * * /usr/bin/php /var/www/example.ru/public_html/local/php_interface/sitemap/generate.php >> /var/log/example-sitemap-cron.log 2>&1
+```
 
-## Revision 2 (2026-10-14)
+Код завершения: `0` — успех, `1` — ошибка, `3` — другой процесс уже генерирует
+тот же индекс. JSON-статистика выводится в stdout; ошибки — в stderr.
+Журнал: `/upload/sitemap-runtime/sitemap.log` по умолчанию. Настройте ротацию журнала
+средствами сервера. Lock-файл в корне остаётся после запуска: блокировка снимается
+через `flock`, удалять lock-файл во время работы нельзя.
 
-Removed SQLite3 dependency. Two-pass spool and GNU sort deduplicate URLs using SHA-256 hashes on disk. Removed ACTIVE_DATE=Y. Existing sitemap files remain untouched; only `--test` is accepted. No cron should be enabled until dev tests pass. Note: errors while processing elements now abort publication.
+Чтобы роботы находили карту, добавьте вручную в `robots.txt`:
+
+```text
+Sitemap: https://example.ru/sitemap_index.xml
+```
+
+Если сайт использует `/sitemap.xml`, укажите `'index_name' => 'sitemap.xml'`.
+Скрипт обновляет только выбранный индекс и свои части; `robots.txt` и остальные
+карты он не меняет. Не назначайте одинаковое имя индекса двум разным генераторам,
+например этому скрипту и штатному заданию SEO-модуля.
+
+## Параметры
+
+| Ключ | Значение по умолчанию / назначение |
+| --- | --- |
+| `host` | `null`: домен из настроек Битрикс и HTTPS; можно задать адрес явно |
+| `root_iblocks` | Обязательная строка ID/диапазонов или массив ID; повторы убираются |
+| `site_id` | `s1`; проверяется принадлежность инфоблоков сайту |
+| `document_root` | `null`: автоматический поиск корня |
+| `index_name` | `sitemap_index.xml` в корне сайта |
+| `file_prefix` | `sitemap-auto`; префикс генерируемых частей |
+| `work_relative` | `/upload/sitemap-runtime`; сортировка, журнал, манифесты и предпросмотры |
+| `batch_size` | `500`; размер запроса элементов, от 1 до 10 000 |
+| `sort_chunk_size` | `10000`; максимум уникальных URL в буфере сортировки |
+| `max_urls` | `45000`; от 1 до 50 000 URL на часть |
+| `max_bytes` | `45000000`; размер XML с экранированием, максимум 52 428 800 байт |
+| `retention_days` | `7`; хранение частей после замены индекса, минимум один день |
+| `allow_empty` | `false`; пустой результат не заменяет рабочую карту |
+| `active_date` | `false`: все активные элементы без фильтра по окну дат; `true` включает этот фильтр |
+| `check_permissions` | `true`; проверять право чтения анонимного посетителя |
+| `exclude_path_patterns` | По умолчанию исключает `/bitrix/`, `/local/`, `/upload/` |
+
+Неверные ключи и значения вызывают ошибку до запуска выборки. Старые ключи
+`iblocks`, `candidate_iblocks`, `output_relative`, `log_relative`, `lock_relative`
+заменены приведёнными выше настройками.
+
+Примеры `root_iblocks`: `'10'`, `'10,20,30'`, `'10-15'`, `'10-15,20,25-30'`,
+`[10, 20, 30]`, `array_merge(range(10, 15), [20])`. Границы диапазонов включаются.
+Пробелы допустимы. Обратные диапазоны, нулевые ID и пустые части строки вызывают
+ошибку. Разрешено до 10 000 развёрнутых ID, чтобы опечатка в диапазоне не исчерпала память.
+
+## Отбор и URL
+
+* Выбираются активные элементы активных инфоблоков. Ошибочный, неактивный или
+  не привязанный к сайту ID останавливает генерацию.
+* `active_date=true` дополнительно учитывает начало и окончание активности.
+  Значение `false` включает все активные элементы независимо от окна дат;
+  именно оно выставлено в поставляемом конфиге для архивов новостных изданий.
+* Элементы берутся независимо от активности разделов: карта формируется только
+  из элементов. Права гостя учитываются через `CHECK_PERMISSIONS`, `PERMISSIONS_BY=0`,
+  `MIN_PERMISSION=R`. Доступность на уровне компонентов и вашей бизнес-логики
+  требует проверки на конкретном сайте.
+* `GetNext(false, false)` подставляет шаблоны `DETAIL_PAGE_URL` и не экранирует `&`.
+  XML-экранирование выполняется один раз при записи.
+* Допускаются корневые относительные URL и абсолютные URL того же домена,
+  схемы и порта. Необработанные `#ШАБЛОНЫ#`, фрагменты, чужие домены, служебные
+  пути, некорректный UTF-8 и слишком длинные URL пропускаются.
+* `TIMESTAMP_X` преобразуется форматом даты Битрикс в `lastmod` (`YYYY-MM-DD`).
+  Некорректная дата не записывается и учитывается в `invalid_lastmod`.
+* Одинаковые итоговые URL включаются один раз; берётся самая поздняя дата изменения.
+  Параметры query сохраняются. Разные URL одинакового контента автоматически
+  не объединяются.
+
+Скрипт использует URL-шаблоны **настроек инфоблоков**. Шаблон «URL страницы
+детального просмотра» должен соответствовать реальному маршруту элемента, например
+`/news/#ELEMENT_CODE#/`. Если маршруты задаются только в SEF-настройках компонентов
+и отличаются от этих шаблонов, согласуйте настройки инфоблоков с компонентами.
+Специальных маршрутов и привязок к конкретному изданию в генераторе нет.
+
+## Производительность и обновление
+
+Выборка идёт отдельно по каждому инфоблоку пакетами `ID > lastId`, без OFFSET,
+общего COUNT и загрузки свойств. URL сортируются и объединяются средствами PHP
+во временных файлах: буфер ограничен количеством записей и примерно 8 МБ,
+одновременно открывается не более 32 входных файлов слияния. Фактическое
+потребление памяти также зависит от PHP и загруженного ядра Битрикс.
+Нужен запас диска для промежуточной сортировки, новых XML и сохранённых старых частей.
+
+До публикации все XML полностью читаются `XMLReader`: проверяются корректность
+XML, корневой элемент и пространство имён. Размер части считается по фактическим
+сериализованным байтам, включая XML-экранирование. Это не проверка по XSD.
+
+Каждый запуск создаёт части с уникальным именем. Сначала они копируются в корень,
+затем временный индекс в том же корне заменяет основной через `rename`.
+При ошибке до замены индекса прежняя карта сохраняется, новые опубликованные
+части удаляются по возможности. При аварийном завершении процесса могут остаться
+неиспользуемые файлы; их можно удалить после диагностики.
+
+Прежние части хранятся `retention_days`, считая **с момента замены**. При последующих
+успешных запусках удаляются только части, перечисленные в собственных манифестах
+генератора для этого индекса. Посторонние `sitemap-*.xml` не удаляются.
+После успешной публикации ошибка очистки попадает в `warnings` и не отменяет результат.
+
+Локальная файловая система должна поддерживать `flock` и замену файла через
+`rename`; поведение сетевых хранилищ следует проверить отдельно. Выгрузка не является
+снимком БД: изменения контента во время обхода могут попасть в следующий запуск.
+
+Статистика: `processed`, `included`, `invalid`, `duplicate`, `invalid_lastmod`,
+`invalid_samples` (до 10 ID), `files`, `seconds`, `peak_memory_bytes`, `warnings`.
+
+Генератор не запрашивает HTTP-страницы, не проверяет canonical, robots/noindex,
+редиректы или ответы 200. После настройки проверьте несколько URL каждого инфоблока,
+особенно если используются нестандартные маршруты или ограничения компонентов.
+
+## Проверки без установленного Битрикс
+
+```bash
+php tests/run.php
+```
+
+Проверяются несколько инфоблоков, пакетная выборка, URL и даты, права гостя,
+дедупликация с несколькими проходами слияния, байтовые лимиты, блокировка,
+ошибки БД/URL/XML/публикации, пустая выборка, повторная публикация, очистка,
+предпросмотр и реальный запуск CLI с подменой API Битрикс.
+Интеграция с живым ядром и базой должна проверяться на вашем стенде через `--test`.
+
+API: [CIBlockElement::GetList](https://dev.1c-bitrix.ru/api_help/iblock/classes/ciblockelement/getlist.php),
+[CIBlockResult::GetNext](https://dev.1c-bitrix.ru/api_help/iblock/classes/ciblockresult/getnext.php).

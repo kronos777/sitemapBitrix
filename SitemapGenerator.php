@@ -1,107 +1,264 @@
 <?php
 declare(strict_types=1);
-final class SitemapGenerator {
- public function __construct(private array $config) {}
- private function photoReportUrl(array $row): ?string {
-    $sectionToIblock = [
-        48437 => 167,
-        48438 => 168,
-        48439 => 169,
-        48440 => 170,
-        48441 => 171,
-        48442 => 172,
-        48443 => 173,
-        48444 => 174,
-        48445 => 175,
-        48446 => 176,
-        48447 => 177,
-        48448 => 178,
-        48449 => 179,
-        48450 => 180,
-        48451 => 181,
-        48453 => 185,
-    ];
 
-    $sectionId = (int)($row['IBLOCK_SECTION_ID'] ?? 0);
-    $elementId = (int)($row['ID'] ?? 0);
+final class SitemapGenerator
+{
+    public function __construct(private array $config) {}
 
-    if ($elementId <= 0 || !isset($sectionToIblock[$sectionId])) {
-        error_log(
-            'Sitemap: skipped photo report ID=' . $elementId .
-            ', section=' . $sectionId
-        );
-        return null;
+    public function run(bool $test = false): array
+    {
+        if (!class_exists('XMLReader')) {
+            throw new RuntimeException('PHP extension xmlreader is required');
+        }
+        $root = $this->config['document_root'];
+        $lockPath = $root . '/.sitemap-' . substr(hash('sha256', $this->config['index_name']), 0, 16) . '.lock';
+        if (is_link($lockPath)) {
+            throw new RuntimeException('Lock must not be a symlink');
+        }
+        $lock = fopen($lockPath, 'c');
+        if ($lock === false) {
+            throw new RuntimeException('Cannot open sitemap lock');
+        }
+        try {
+            if (!flock($lock, LOCK_EX | LOCK_NB)) {
+                throw new RuntimeException('Another generation is running', 3);
+            }
+            return $this->generate($root, $test);
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
     }
 
-    return $this->config['host']
-        . '/zdr/'
-        . $sectionToIblock[$sectionId]
-        . '/foto/?ID='
-        . $elementId;
-}
- private function url(array $row): ?string {
-  if ((int)($row['IBLOCK_ID'] ?? 0) === 305) {
-	return $this->photoReportUrl($row);
-  } 
-  $raw=html_entity_decode(trim((string)($row['DETAIL_PAGE_URL']??'')),ENT_QUOTES|ENT_HTML5,'UTF-8');
-  if ($raw==='' || str_contains($raw,'#') || preg_match('~[\x00-\x20<>]~',$raw)) return null;
-  if (str_starts_with($raw,'/')) $raw=$this->config['host'].$raw;
-  $parts=parse_url($raw);
-  if ($parts===false || strtolower($parts['scheme']??'')!=='https' || strtolower($parts['host']??'')!=='gudok.ru' || isset($parts['user']) || isset($parts['pass']) || isset($parts['port'])) return null;
-  $path=$parts['path']??'/';
-  foreach ($this->config['exclude_path_patterns'] as $pattern) if (preg_match($pattern,$path)) return null;
-  if ($path==='/' && empty($parts['query'])) return null;
-  return $raw;
- }
- private function date(array $row): ?string {
-  $raw=trim((string)($row['TIMESTAMP_X']??''));if ($raw==='') return null;
-  try {return (new DateTimeImmutable($raw))->format('Y-m-d');}catch(Throwable){return null;}
- }
- public function run(): array {
-  $root=rtrim($this->config['document_root'],'/');$relative=$this->config['output_relative'];
-  if (!preg_match('~^/upload/[a-zA-Z0-9_/-]+$~',$relative) || str_contains($relative,'..')) throw new RuntimeException('Unsafe output path');
-  $target=$root.$relative;$parent=dirname($target);
-  if (!is_dir($parent) && !mkdir($parent,0775,true) && !is_dir($parent)) throw new RuntimeException('Cannot create parent');
-  $stage=$parent.'/.sitemap-stage-'.getmypid();
-  if (file_exists($stage) || !mkdir($stage,0775)) throw new RuntimeException('Cannot create stage');
-  $started=microtime(true);$stats=['processed'=>0,'included'=>0,'invalid'=>0,'duplicate'=>0,'errors'=>0];
-  try {
-   // Disk-backed spool; GNU sort uses bounded RAM and temporary files in stage.
-   $spool=$stage.'/urls.tsv';$fh=fopen($spool,'wb');if (!$fh) throw new RuntimeException('Cannot open spool');
-   try {
-    (new SitemapRepository($this->config))->iterate(function(array $row)use(&$stats,$fh){
-     $stats['processed']++;
-     try {
-      $url=$this->url($row);if ($url===null) {$stats['invalid']++;return;}
-      $line=hash('sha256',$url)."\t".base64_encode($url)."\t".($this->date($row)??'')."\n";
-      if (fwrite($fh,$line)!==strlen($line)) throw new RuntimeException('Spool write failed');
-     } catch(Throwable $e) {$stats['errors']++;if ($stats['errors']<=20) error_log('Sitemap element '.($row['ID']??'?').': '.$e->getMessage());if ($stats['errors']>100) throw new RuntimeException('Too many errors');}
-    });
-   } finally {fclose($fh);}
-   if ($stats['errors']>0) throw new RuntimeException('Element processing errors; refusing to publish incomplete sitemap');
-   $sorted=$stage.'/sorted.tsv';
-   $command='LC_ALL=C sort -T '.escapeshellarg($stage).' -S 32M -t '.escapeshellarg("\t").' -k1,1 '.escapeshellarg($spool).' -o '.escapeshellarg($sorted).' 2>&1';
-   exec($command,$output,$exit);if ($exit!==0) throw new RuntimeException('GNU sort failed: '.implode(' ',array_slice($output,0,5)));
-   $reader=fopen($sorted,'rb');if (!$reader) throw new RuntimeException('Cannot read sorted spool');
-   $writer=new SitemapXmlWriter($stage,(int)$this->config['max_urls'],(int)$this->config['max_bytes']);$previous=null;
-   try {while (($line=fgets($reader))!==false) {
-    $fields=explode("\t",rtrim($line,"\r\n"),3);if (count($fields)!==3) throw new RuntimeException('Corrupted spool record');
-    if ($fields[0]===$previous) {$stats['duplicate']++;continue;}
-    $url=base64_decode($fields[1],true);if ($url===false || hash('sha256',$url)!==$fields[0]) throw new RuntimeException('Corrupted spool URL');
-    $writer->add($url,$fields[2]!==''?$fields[2]:null);$stats['included']++;$previous=$fields[0];
-   } if (!feof($reader)) throw new RuntimeException('Sorted spool read failed');} finally {fclose($reader);}
-   $files=$writer->finish($this->config['host'].$relative);
-   unlink($spool);unlink($sorted);
-   foreach (array_merge($files,['sitemap_index.xml']) as $file) {
-    if (!is_file($stage.'/'.$file) || filesize($stage.'/'.$file)>50000000) throw new RuntimeException('XML size limit '.$file);
-    $xml=new XMLReader();if (!$xml->open($stage.'/'.$file)) throw new RuntimeException('XML open failed');
-    try {while($xml->read()){} } finally {$xml->close();}
-   }
-   $backup=null;
-   if (is_dir($target)) {$backup=$parent.'/.sitemap-previous-'.getmypid();if (file_exists($backup)||!rename($target,$backup)) throw new RuntimeException('Cannot move previous target');}
-   if (!rename($stage,$target)) {if ($backup!==null) rename($backup,$target);throw new RuntimeException('Cannot publish stage');}
-   $stats['files']=count($files);$stats['seconds']=round(microtime(true)-$started,2);$stats['previous_directory']=$backup;
-   return $stats;
-  } catch(Throwable $e) {error_log('Sitemap generation aborted: '.$e->getMessage().'; staging directory: '.$stage);throw $e;}
- }
+    private function generate(string $root, bool $test): array
+    {
+        $started = microtime(true);
+        $work = $root . $this->config['work_relative'];
+        if (!is_dir($work) && !mkdir($work, 0775, true) && !is_dir($work)) {
+            throw new RuntimeException('Cannot create work directory');
+        }
+        $resolved = str_replace('\\', '/', (string) realpath($work));
+        if (!str_starts_with($resolved . '/', $root . '/')) {
+            throw new RuntimeException('Work directory must stay inside document_root');
+        }
+        $token = gmdate('YmdHis') . '-' . bin2hex(random_bytes(8));
+        $stage = $work . '/run-' . $token;
+        if (!mkdir($stage, 0700)) {
+            throw new RuntimeException('Cannot create staging directory');
+        }
+        $stats = [
+            'processed' => 0, 'included' => 0, 'invalid' => 0, 'duplicate' => 0,
+            'invalid_lastmod' => 0, 'invalid_samples' => [], 'warnings' => [], 'test' => $test,
+        ];
+        try {
+            $store = new SitemapUrlStore($stage, $this->config['sort_chunk_size']);
+            $urls = new SitemapUrl($this->config);
+            (new SitemapRepository($this->config))->iterate(function (array $element) use ($store, $urls, &$stats): void {
+                ++$stats['processed'];
+                $url = $urls->fromElement($element);
+                if ($url === null) {
+                    ++$stats['invalid'];
+                    if (count($stats['invalid_samples']) < 10) {
+                        $stats['invalid_samples'][] = ['iblock' => $element['IBLOCK_ID'], 'id' => $element['ID']];
+                    }
+                    return;
+                }
+                $lastmod = SitemapUrl::lastmod($element);
+                if ($lastmod === null && !empty($element['TIMESTAMP_X'])) {
+                    ++$stats['invalid_lastmod'];
+                }
+                $store->add($url, $lastmod);
+            });
+            $writer = new SitemapXmlWriter($stage, $this->config['file_prefix'] . '-' . $token,
+                $this->config['max_urls'], $this->config['max_bytes']);
+            foreach ($store->records() as [$url, $lastmod]) {
+                $writer->add($url, $lastmod === '' ? null : $lastmod);
+                ++$stats['included'];
+            }
+            if (!$stats['included'] && !$this->config['allow_empty']) {
+                throw new RuntimeException('No valid URLs; previous sitemap preserved (allow_empty=false)');
+            }
+            $stats['duplicate'] = $stats['processed'] - $stats['invalid'] - $stats['included'];
+            $files = $writer->finish($this->config['host'], $this->config['index_name']);
+            $store->cleanup();
+            foreach (array_merge($files, [$this->config['index_name']]) as $name) {
+                $this->validateXml($stage . '/' . $name, $name === $this->config['index_name'] ? 'sitemapindex' : 'urlset');
+            }
+            if ($test) {
+                $stats['preview_directory'] = $stage;
+            } else {
+                $this->publish($root, $work, $stage, $token, $files, $stats);
+            }
+            $stats['files'] = count($files);
+            $stats['index_url'] = $this->config['host'] . '/' . $this->config['index_name'];
+            $stats['seconds'] = round(microtime(true) - $started, 3);
+            $stats['peak_memory_bytes'] = memory_get_peak_usage(true);
+            return $stats;
+        } catch (Throwable $error) {
+            throw new RuntimeException($error->getMessage() . '; staging: ' . $stage, (int) $error->getCode(), $error);
+        }
+    }
+
+    private function validateXml(string $path, string $rootName): void
+    {
+        if (!is_file($path) || filesize($path) > 52428800) {
+            throw new RuntimeException('Invalid XML size: ' . basename($path));
+        }
+        $previous = libxml_use_internal_errors(true);
+        libxml_clear_errors();
+        $reader = new XMLReader();
+        try {
+            if (!$reader->open($path, null, LIBXML_NONET)) {
+                throw new RuntimeException('Cannot read XML: ' . $path);
+            }
+            $foundRoot = false;
+            while ($reader->read()) {
+                if ($reader->nodeType === XMLReader::DOC_TYPE) {
+                    throw new RuntimeException('DOCTYPE is not allowed');
+                }
+                if ($reader->nodeType === XMLReader::ELEMENT && $reader->depth === 0) {
+                    $foundRoot = $reader->localName === $rootName
+                        && $reader->namespaceURI === 'http://www.sitemaps.org/schemas/sitemap/0.9';
+                }
+            }
+            if (!$foundRoot || libxml_get_errors()) {
+                throw new RuntimeException('Malformed XML: ' . basename($path));
+            }
+        } finally {
+            $reader->close();
+            libxml_clear_errors();
+            libxml_use_internal_errors($previous);
+        }
+    }
+
+    private function publish(string $root, string $work, string $stage, string $token, array $files, array &$stats): void
+    {
+        $published = [];
+        $indexName = $this->config['index_name'];
+        $temporaryIndex = $root . '/.' . $indexName . '-' . $token . '.tmp';
+        $manifest = $work . '/published-' . $token . '.json';
+        $committed = false;
+        try {
+            foreach ($files as $file) {
+                $target = $root . '/' . $file;
+                if (file_exists($target) || is_link($target)) {
+                    throw new RuntimeException('Sitemap part already exists: ' . $file);
+                }
+                // Имена уникальны для запуска: старый индекс продолжает ссылаться на старые части.
+                $this->copyExclusive($stage . '/' . $file, $target);
+                $published[] = $target;
+            }
+            $this->copyExclusive($stage . '/' . $indexName, $temporaryIndex);
+            $metadata = json_encode([
+                'index' => $indexName, 'prefix' => $this->config['file_prefix'], 'token' => $token,
+                'published_at' => time(), 'files' => $files,
+            ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+            if (file_put_contents($manifest, $metadata, LOCK_EX) !== strlen($metadata)) {
+                throw new RuntimeException('Cannot write publication manifest');
+            }
+            if (is_link($root . '/' . $indexName) || (file_exists($root . '/' . $indexName) && !is_file($root . '/' . $indexName))) {
+                throw new RuntimeException('Index target must be a regular file');
+            }
+            // Временный индекс и конечный индекс находятся на одной файловой системе.
+            if (!rename($temporaryIndex, $root . '/' . $indexName)) {
+                throw new RuntimeException('Cannot replace root sitemap index');
+            }
+            $committed = true;
+        } finally {
+            if (!$committed) {
+                foreach ($published as $path) {
+                    @unlink($path);
+                }
+                @unlink($temporaryIndex);
+                @unlink($manifest);
+            }
+        }
+
+        // Индекс уже опубликован. Сбой обслуживания не отменяет успешное обновление.
+        try {
+            $this->cleanupOld($root, $work, $token, $files);
+            foreach (array_merge($files, [$indexName]) as $file) {
+                if (!unlink($stage . '/' . $file)) {
+                    throw new RuntimeException('Cannot remove staged XML');
+                }
+            }
+            if (!rmdir($stage)) {
+                throw new RuntimeException('Cannot remove completed staging directory');
+            }
+        } catch (Throwable $error) {
+            $stats['warnings'][] = $error->getMessage();
+        }
+    }
+
+    private function copyExclusive(string $source, string $target): void
+    {
+        $input = fopen($source, 'rb');
+        if ($input === false) {
+            throw new RuntimeException('Cannot open generated XML');
+        }
+        $output = null;
+        $complete = false;
+        try {
+            $output = fopen($target, 'xb');
+            if ($output === false) {
+                throw new RuntimeException('Cannot create ' . basename($target));
+            }
+            if (stream_copy_to_stream($input, $output) !== filesize($source) || !fflush($output) || !chmod($target, 0644)) {
+                throw new RuntimeException('Cannot publish ' . basename($target));
+            }
+            $complete = true;
+        } finally {
+            fclose($input);
+            if (is_resource($output)) {
+                fclose($output);
+                if (!$complete) {
+                    @unlink($target);
+                }
+            }
+        }
+    }
+
+    private function cleanupOld(string $root, string $work, string $currentToken, array $currentFiles): void
+    {
+        $cutoff = time() - $this->config['retention_days'] * 86400;
+        foreach (new DirectoryIterator($work) as $entry) {
+            if (!$entry->isFile() || $entry->isLink() || !preg_match('~^published-(\d{14}-[a-f0-9]{16})\.json$~D', $entry->getFilename(), $matches)
+                || $matches[1] === $currentToken) {
+                continue;
+            }
+            $data = json_decode((string) file_get_contents($entry->getPathname()), true, 512, JSON_THROW_ON_ERROR);
+            if (!is_array($data) || ($data['index'] ?? null) !== $this->config['index_name']
+                || ($data['token'] ?? null) !== $matches[1] || !is_int($data['published_at'] ?? null)
+                || !is_array($data['files'] ?? null)
+                || !is_string($data['prefix'] ?? null) || !preg_match('~^[a-z0-9][a-z0-9_-]{0,39}$~D', $data['prefix'])) {
+                continue;
+            }
+            // Срок хранения отсчитывается от замены, даже если старая карта жила месяц.
+            if (!isset($data['retired_at'])) {
+                $data['retired_at'] = time();
+                $temporary = $entry->getPathname() . '.tmp';
+                $json = json_encode($data, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+                if (file_put_contents($temporary, $json, LOCK_EX) !== strlen($json)
+                    || !rename($temporary, $entry->getPathname())) {
+                    throw new RuntimeException('Cannot retire previous sitemap manifest');
+                }
+                continue;
+            }
+            if (!is_int($data['retired_at']) || $data['retired_at'] >= $cutoff) {
+                continue;
+            }
+            foreach ($data['files'] as $file) {
+                if (!is_string($file) || !preg_match('~^' . preg_quote($data['prefix'] . '-' . $data['token'], '~') . '-[0-9]{4,5}\.xml$~D', $file)
+                    || in_array($file, $currentFiles, true) || is_link($root . '/' . $file)) {
+                    throw new RuntimeException('Unsafe cleanup manifest: ' . $entry->getFilename());
+                }
+                if (is_file($root . '/' . $file) && !unlink($root . '/' . $file)) {
+                    throw new RuntimeException('Cannot remove expired sitemap part: ' . $file);
+                }
+            }
+            if (!unlink($entry->getPathname())) {
+                throw new RuntimeException('Cannot remove expired manifest');
+            }
+        }
+    }
 }
